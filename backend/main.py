@@ -1,19 +1,20 @@
-            # main.py
+# main.py
 import io
 import os
 import zipfile
 import pickle
 import shutil
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import cv2
 import numpy as np
 import face_recognition
 
-from fastapi import FastAPI, File, UploadFile, Query, HTTPException, Response
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel
 
 # ----------------- Paths -----------------
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -33,11 +34,17 @@ if not os.path.exists(LOG_FILE):
 app = FastAPI(title="Face Attendance API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],  # Allow all origins for development
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=True
 )
+
+# ----------------- Pydantic Models -----------------
+class SearchIn(BaseModel):
+    embedding: List[float]
+    threshold: float = 0.6
+
 
 # ----------------- Helpers -----------------
 def now_str() -> str:
@@ -61,11 +68,8 @@ def read_image_from_upload(file: UploadFile) -> np.ndarray:
 def get_face_encodings_bgr(img_bgr: np.ndarray) -> List[np.ndarray]:
     """Return list of face encodings using proper RGB conversion, with a fallback model."""
     rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    
-    # Try HOG with upsampling first for speed
-    boxes = face_recognition.face_locations(rgb, model="hog", upsample_num_times=2)
-    
-    # If no faces are found, fall back to the more robust CNN model
+
+    boxes = face_recognition.face_locations(rgb, model="hog")
     if not boxes:
         boxes = face_recognition.face_locations(rgb, model="cnn")
 
@@ -83,7 +87,6 @@ def load_user_encodings(name: str) -> List[np.ndarray]:
         return []
     with open(p, "rb") as f:
         data = pickle.load(f)
-    # ensure np arrays
     return [np.asarray(v, dtype=np.float64) for v in data]
 
 def save_user_encodings(name: str, encs: List[np.ndarray]):
@@ -108,28 +111,25 @@ def best_match(enc: np.ndarray, user_names: List[str], tolerance: float = 0.6) -
         matched = True
     return best_name, matched, best_dist
 
-def save_snapshot(img_bgr: np.ndarray, user: str):
-    user_dir = os.path.join(SNAP_DIR, user)
-    os.makedirs(user_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out = os.path.join(user_dir, f"{ts}.jpg")
-    cv2.imwrite(out, img_bgr)
-
-# Add this new helper function
 def preprocess_image(img_bgr: np.ndarray) -> np.ndarray:
     """Enhances image for better face detection using CLAHE."""
-    # Convert BGR to grayscale
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
-    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced_gray = clahe.apply(gray)
-    
-    # Optional: You can also combine with a slight blur to reduce noise
-    # enhanced_gray = cv2.GaussianBlur(enhanced_gray, (3, 3), 0)
-
-    # Convert back to BGR for face_recognition library
     return cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR)
+
+def _best_user_for_embedding(enc_vec: np.ndarray, user_names: List[str], tol: float) -> Tuple[str, bool, float]:
+    """Helper to match a single embedding vector against DB."""
+    best_name, matched, best_dist = "unknown_person", False, 1.0
+    for name in user_names:
+        refs = load_user_encodings(name)
+        if not refs:
+            continue
+        d = float(np.min(face_recognition.face_distance(refs, enc_vec)))
+        if d < best_dist:
+            best_name, best_dist = name, d
+    matched = best_dist <= tol
+    return best_name, matched, best_dist
 
 
 # ----------------- Endpoints -----------------
@@ -137,134 +137,162 @@ def preprocess_image(img_bgr: np.ndarray) -> np.ndarray:
 def health():
     return {"ok": True, "users": list_users()}
 
-@app.post("/register_new_user")
-def register_new_user(text: str = Query(..., min_length=1), file: UploadFile = File(...)):
-    """
-    Register a new user:
-      - Query: ?text=<name>
-      - Body:  multipart/form-data, field 'file' with an image
-    """
-    name = text.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Name is empty")
 
+# ---- New: return a 128-D embedding for an uploaded face image
+@app.post("/embed")
+def embed(file: UploadFile = File(...)):
+    """
+    Body: multipart/form-data with 'file' (image)
+    Response: { "embedding": [ ...128 floats... ] }
+    """
     img = read_image_from_upload(file)
-    # Preprocess the image before finding faces
     enhanced_img = preprocess_image(img)
-
     encs = get_face_encodings_bgr(enhanced_img)
 
     if len(encs) == 0:
-        save_log("register_fail", name, False, "no_face")
-        return {"registration_status": 400, "error": "No face found. Try again."}
+        raise HTTPException(status_code=400, detail="No face found")
     if len(encs) > 1:
-        save_log("register_fail", name, False, "multiple_faces")
-        return {"registration_status": 400, "error": "Multiple faces found. Use a single-face image."}
+        raise HTTPException(status_code=400, detail="Multiple faces found")
+
+    return {"embedding": encs[0].astype(float).tolist()}
+
+
+@app.post("/enroll")
+def enroll(
+    userName: str = Form(...),
+    file: UploadFile = File(...),
+    # Optional additional fields (accepted but not required)
+    fullName: Optional[str] = Form(None),
+    age: Optional[str] = Form(None),
+    condition: Optional[str] = Form(None),
+    contact: Optional[str] = Form(None),
+    email: Optional[str] = Form(None),
+    password: Optional[str] = Form(None)
+):
+    """
+    Register (or add a new sample for) a user's face.
+      - Body: multipart/form-data with 'file' (image) and 'userName' (string)
+      - Extra fields are accepted and ignored by the face store (Node handles Mongo).
+    """
+    name = userName.strip()
+    if not name:
+        return JSONResponse(status_code=400, content={"success": False, "error": "Username is empty."})
+
+    img = read_image_from_upload(file)
+    enhanced_img = preprocess_image(img)
+    encs = get_face_encodings_bgr(enhanced_img)
+
+    if len(encs) == 0:
+        save_log("enroll_fail", name, False, "no_face")
+        return JSONResponse(status_code=400, content={"success": False, "error": "No face found in the image."})
+    if len(encs) > 1:
+        save_log("enroll_fail", name, False, "multiple_faces")
+        return JSONResponse(status_code=400, content={"success": False, "error": "Multiple faces found. Please use a single-face image."})
 
     enc = encs[0]
-
-    # Append to existing encodings if user exists (multi-sample enrollment helps robustness)
     existing = load_user_encodings(name)
     existing.append(enc)
     save_user_encodings(name, existing)
 
+    save_log("enroll", name, True, f"encodings={len(existing)}")
+    # Return a lightweight "patient" object (userName + optional fullName)
+    return JSONResponse(content={
+        "success": True,
+        "patient": {"userName": name, "fullName": fullName or name},
+        "message": f"Registered/updated '{name}'. Total samples: {len(existing)}."
+    })
 
 
-    save_log("register", name, True, f"encodings={len(existing)}")
-    return {"registration_status": 200, "message": f"Registered/updated '{name}' with {len(existing)} sample(s)."}
-
-@app.post("/login")
-def login(file: UploadFile = File(...)):
+# ---- Upgraded: one /search endpoint that supports BOTH JSON and multipart modes
+@app.post("/search")
+async def search(request: Request, file: UploadFile = File(None)):
     """
-    Login with a face image:
-      - Body: multipart/form-data, field 'file'
+    Authenticate a user via face recognition.
+
+    Supports two modes:
+    1) JSON body:
+       { "embedding": [...128 floats...], "threshold": 0.6 }
+    2) multipart/form-data with 'file' (image)
     """
-    img = read_image_from_upload(file)
-    # Preprocess the image before finding faces
-    enhanced_img = preprocess_image(img)
-    encs = get_face_encodings_bgr(enhanced_img)
-    if len(encs) == 0:
-        save_log("login_fail", "unknown_person", False, "no_face")
-        return {"match_status": False, "user": "unknown_person", "distance": None, "message": "No face found."}
-    if len(encs) > 1:
-        # Choose the largest face (more stable)
-        # Recompute boxes to pick largest
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        boxes = face_recognition.face_locations(rgb, model="hog")
-        # sort by area
-        boxes = sorted(boxes, key=lambda b: (b[2]-b[0])*(b[1]-b[3]), reverse=True)
-        encs = face_recognition.face_encodings(rgb, known_face_locations=[boxes[0]])
+    ct = request.headers.get("content-type", "")
 
-    enc = encs[0]
-    users = list_users()
-    if not users:
-        save_log("login_fail", "unknown_person", False, "no_users_in_db")
-        return {"match_status": False, "user": "unknown_person", "distance": None, "message": "No users enrolled."}
+    # ---- JSON mode: {embedding, threshold}
+    if "application/json" in ct:
+        data = await request.json()
+        try:
+            payload = SearchIn(**data)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON for search")
 
-    name, matched, dist = best_match(enc, users, tolerance=0.6)
-    if matched:
-        # save_snapshot(img, name)  # Removed to prevent permanent storage
-        save_log("login", name, True, f"dist={dist:.3f}")
-        return {"match_status": True, "user": name, "distance": dist, "message": f"Welcome back {name}!"}
+        if not payload.embedding or len(payload.embedding) != 128:
+            raise HTTPException(status_code=400, detail="Invalid embedding")
+
+        users = list_users()
+        if not users:
+            save_log("search_fail", "unknown_person", False, "no_users_in_db")
+            return {"match": False, "patient": None, "distance": None, "message": "No users enrolled in the system."}
+
+        enc_vec = np.asarray(payload.embedding, dtype=np.float64)
+        name, matched, dist = _best_user_for_embedding(enc_vec, users, payload.threshold)
+        if matched:
+            save_log("search", name, True, f"dist={dist:.3f}")
+            return {"match": True, "patient": {"userName": name}, "distance": dist, "message": f"Welcome back {name}!"}
+        else:
+            save_log("search_fail", "unknown_person", False, f"best={name}, dist={dist:.3f}")
+            return {"match": False, "patient": {"userName": "unknown_person"}, "distance": dist, "message": "Unknown user."}
+
+    # ---- multipart/form-data mode: 'file'
+    elif "multipart/form-data" in ct:
+        if file is None:
+            raise HTTPException(status_code=400, detail="No file part in form-data")
+
+        img = read_image_from_upload(file)
+        enhanced_img = preprocess_image(img)
+        encs = get_face_encodings_bgr(enhanced_img)
+
+        if len(encs) == 0:
+            save_log("search_fail", "unknown_person", False, "no_face")
+            return {"match": False, "patient": None, "message": "No face found."}
+
+        if len(encs) > 1:
+            # take largest face
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            boxes = face_recognition.face_locations(rgb, model="hog")
+            if boxes:
+                boxes = sorted(boxes, key=lambda b: (b[2]-b[0])*(b[1]-b[3]), reverse=True)
+                encs = face_recognition.face_encodings(rgb, known_face_locations=[boxes[0]])
+
+        enc = encs[0]
+        users = list_users()
+        if not users:
+            save_log("search_fail", "unknown_person", False, "no_users_in_db")
+            return {"match": False, "patient": None, "message": "No users enrolled in the system."}
+
+        name, matched, dist = best_match(enc, users, tolerance=0.6)
+
+        if matched:
+            save_log("search", name, True, f"dist={dist:.3f}")
+            return {"match": True, "patient": {"userName": name}, "distance": dist, "message": f"Welcome back {name}!"}
+        else:
+            save_log("search_fail", "unknown_person", False, f"best={name}, dist={dist:.3f}")
+            return {"match": False, "patient": {"userName": "unknown_person"}, "distance": dist, "message": "Unknown user."}
+
+    # ---- Unsupported content-type
     else:
-        save_log("login_fail", "unknown_person", False, f"best={name}, dist={dist:.3f}")
-        return {"match_status": False, "user": "unknown_person", "distance": dist, "message": "Unknown user."}
+        raise HTTPException(status_code=415, detail="Unsupported Content-Type for /search")
 
-@app.post("/logout")
-def logout(file: UploadFile = File(...)):
-    """
-    Logout with a face image:
-      - Body: multipart/form-data, field 'file'
-    """
-    img = read_image_from_upload(file)
-    # Preprocess the image before finding faces
-    enhanced_img = preprocess_image(img)
-
-    encs = get_face_encodings_bgr(enhanced_img)
-    if len(encs) == 0:
-        save_log("logout_fail", "unknown_person", False, "no_face")
-        return {"match_status": False, "user": "unknown_person", "distance": None, "message": "No face found."}
-    enc = encs[0]
-
-    users = list_users()
-    if not users:
-        save_log("logout_fail", "unknown_person", False, "no_users_in_db")
-        return {"match_status": False, "user": "unknown_person", "distance": None, "message": "No users enrolled."}
-
-    name, matched, dist = best_match(enc, users, tolerance=0.6)
-    if matched:
-        # save_snapshot(img, name)  # Removed to prevent permanent storage
-        save_log("logout", name, True, f"dist={dist:.3f}")
-        return {"match_status": True, "user": name, "distance": dist, "message": f"Goodbye {name}!"}
-    else:
-        save_log("logout_fail", "unknown_person", False, f"best={name}, dist={dist:.3f}")
-        return {"match_status": False, "user": "unknown_person", "distance": dist, "message": "Unknown user."}
 
 @app.get("/get_attendance_logs")
 def get_attendance_logs():
-    """
-    Return a ZIP containing:
-      - logs/attendance.csv
-      - snapshots/<user>/*.jpg
-    """
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # add logs
         if os.path.exists(LOG_FILE):
             zf.write(LOG_FILE, arcname="logs/attendance.csv")
-        # add snapshots
-        if os.path.exists(SNAP_DIR):
-            for root, _, files in os.walk(SNAP_DIR):
-                for f in files:
-                    if f.lower().endswith((".jpg", ".jpeg", ".png")):
-                        full = os.path.join(root, f)
-                        arc = os.path.relpath(full, BASE_DIR)
-                        zf.write(full, arcname=arc)
     mem.seek(0)
     headers = {"Content-Disposition": "attachment; filename=logs.zip"}
     return StreamingResponse(mem, media_type="application/zip", headers=headers)
 
-# ----------------- Optional utilities -----------------
+
 @app.delete("/admin/clear_all")
 def admin_clear_all():
     """Danger: wipe database & snapshots & logs (for testing)."""
@@ -274,4 +302,4 @@ def admin_clear_all():
             os.makedirs(d, exist_ok=True)
     with open(LOG_FILE, "w", encoding="utf-8") as f:
         f.write("timestamp,event,user,match,extra\n")
-    return {"ok": True, "message": "All cleared."}
+    return {"ok": True, "message": "All data cleared."}
