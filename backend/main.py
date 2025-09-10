@@ -1,4 +1,4 @@
-# main.py
+            # main.py
 import io
 import os
 import zipfile
@@ -59,10 +59,16 @@ def read_image_from_upload(file: UploadFile) -> np.ndarray:
     return img
 
 def get_face_encodings_bgr(img_bgr: np.ndarray) -> List[np.ndarray]:
-    """Return list of face encodings using proper RGB conversion."""
+    """Return list of face encodings using proper RGB conversion, with a fallback model."""
     rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    # detect @ 1x (fast). If your faces are small, consider model='cnn' or upsample via locations
-    boxes = face_recognition.face_locations(rgb, model="hog")
+    
+    # Try HOG with upsampling first for speed
+    boxes = face_recognition.face_locations(rgb, model="hog", upsample_num_times=2)
+    
+    # If no faces are found, fall back to the more robust CNN model
+    if not boxes:
+        boxes = face_recognition.face_locations(rgb, model="cnn")
+
     if not boxes:
         return []
     encs = face_recognition.face_encodings(rgb, known_face_locations=boxes)
@@ -109,6 +115,23 @@ def save_snapshot(img_bgr: np.ndarray, user: str):
     out = os.path.join(user_dir, f"{ts}.jpg")
     cv2.imwrite(out, img_bgr)
 
+# Add this new helper function
+def preprocess_image(img_bgr: np.ndarray) -> np.ndarray:
+    """Enhances image for better face detection using CLAHE."""
+    # Convert BGR to grayscale
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced_gray = clahe.apply(gray)
+    
+    # Optional: You can also combine with a slight blur to reduce noise
+    # enhanced_gray = cv2.GaussianBlur(enhanced_gray, (3, 3), 0)
+
+    # Convert back to BGR for face_recognition library
+    return cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR)
+
+
 # ----------------- Endpoints -----------------
 @app.get("/health")
 def health():
@@ -126,7 +149,10 @@ def register_new_user(text: str = Query(..., min_length=1), file: UploadFile = F
         raise HTTPException(status_code=400, detail="Name is empty")
 
     img = read_image_from_upload(file)
-    encs = get_face_encodings_bgr(img)
+    # Preprocess the image before finding faces
+    enhanced_img = preprocess_image(img)
+
+    encs = get_face_encodings_bgr(enhanced_img)
 
     if len(encs) == 0:
         save_log("register_fail", name, False, "no_face")
@@ -142,8 +168,7 @@ def register_new_user(text: str = Query(..., min_length=1), file: UploadFile = F
     existing.append(enc)
     save_user_encodings(name, existing)
 
-    # Save snapshot for record
-    save_snapshot(img, name)
+
 
     save_log("register", name, True, f"encodings={len(existing)}")
     return {"registration_status": 200, "message": f"Registered/updated '{name}' with {len(existing)} sample(s)."}
@@ -155,7 +180,9 @@ def login(file: UploadFile = File(...)):
       - Body: multipart/form-data, field 'file'
     """
     img = read_image_from_upload(file)
-    encs = get_face_encodings_bgr(img)
+    # Preprocess the image before finding faces
+    enhanced_img = preprocess_image(img)
+    encs = get_face_encodings_bgr(enhanced_img)
     if len(encs) == 0:
         save_log("login_fail", "unknown_person", False, "no_face")
         return {"match_status": False, "user": "unknown_person", "distance": None, "message": "No face found."}
@@ -176,7 +203,7 @@ def login(file: UploadFile = File(...)):
 
     name, matched, dist = best_match(enc, users, tolerance=0.6)
     if matched:
-        save_snapshot(img, name)
+        # save_snapshot(img, name)  # Removed to prevent permanent storage
         save_log("login", name, True, f"dist={dist:.3f}")
         return {"match_status": True, "user": name, "distance": dist, "message": f"Welcome back {name}!"}
     else:
@@ -190,7 +217,10 @@ def logout(file: UploadFile = File(...)):
       - Body: multipart/form-data, field 'file'
     """
     img = read_image_from_upload(file)
-    encs = get_face_encodings_bgr(img)
+    # Preprocess the image before finding faces
+    enhanced_img = preprocess_image(img)
+
+    encs = get_face_encodings_bgr(enhanced_img)
     if len(encs) == 0:
         save_log("logout_fail", "unknown_person", False, "no_face")
         return {"match_status": False, "user": "unknown_person", "distance": None, "message": "No face found."}
@@ -203,7 +233,7 @@ def logout(file: UploadFile = File(...)):
 
     name, matched, dist = best_match(enc, users, tolerance=0.6)
     if matched:
-        save_snapshot(img, name)
+        # save_snapshot(img, name)  # Removed to prevent permanent storage
         save_log("logout", name, True, f"dist={dist:.3f}")
         return {"match_status": True, "user": name, "distance": dist, "message": f"Goodbye {name}!"}
     else:
