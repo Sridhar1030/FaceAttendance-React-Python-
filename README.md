@@ -380,9 +380,6 @@ SNAPSHOTS_PATH=./snapshots
 
 ---
 
-## 🤝 Contributing
-
-We welcome contributions from the community! Here's how you can help:
 
 ### 🛠 Development Setup
 
@@ -428,56 +425,6 @@ For new features, please:
 - **Describe the use case** and benefits
 - **Provide implementation ideas** if possible
 - **Consider backward compatibility**
-
----
-
-## 📄 License
-
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
-
-```
-MIT License
-
-Copyright (c) 2023 Computer vision developer
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
----
-
-## 🙏 Acknowledgments
-
-- **[face_recognition](https://github.com/ageitgey/face_recognition)** - Amazing facial recognition library
-- **[FastAPI](https://fastapi.tiangolo.com/)** - Modern, fast web framework for building APIs
-- **[React](https://reactjs.org/)** - A JavaScript library for building user interfaces
-- **[OpenCV](https://opencv.org/)** - Open Source Computer Vision Library
-- **[dlib](http://dlib.net/)** - A toolkit for making real world machine learning applications
-
----
-
-## 📞 Support
-
-If you encounter any issues or have questions:
-
-1. **Check the [Issues](https://github.com/Sridhar1030/FaceAttendance-React-Python-/issues)** page for existing solutions
-2. **Create a new issue** with detailed information
-3. **Contact the maintainers** for urgent matters
 
 ---
 
