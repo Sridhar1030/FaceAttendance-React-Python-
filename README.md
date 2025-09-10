@@ -432,6 +432,5 @@ For new features, please:
 
 **⭐ If you find this project useful, please consider giving it a star! ⭐**
 
-**Made with ❤️ by the Face Attendance System Team**
 
 </div>
